@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>foo_zero_metadata Zero Bus WebSocket 测试</title>
+  <style>
+    :root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
+    body { max-width: 1100px; margin: 24px auto; padding: 0 18px; }
+    h1 { font-size: 1.5rem; } h2 { font-size: 1.15rem; margin-top: 0; }
+    fieldset, section { border: 1px solid GrayText; border-radius: 8px; padding: 16px; margin: 16px 0; }
+    .row { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+    .field { display: flex; flex-direction: column; gap: 4px; min-width: 180px; flex: 1; }
+    input, select, textarea, button { font: inherit; padding: 7px 9px; }
+    input, select, textarea { box-sizing: border-box; width: 100%; }
+    textarea { min-height: 110px; resize: vertical; font-family: ui-monospace, Consolas, monospace; }
+    #output { min-height: 360px; }
+    button { cursor: pointer; } button:disabled { cursor: not-allowed; opacity: .55; }
+    .status { margin-left: 4px; font-weight: 600; }
+    .hint { opacity: .8; font-size: .92em; }
+    .checks { display:flex; flex-wrap:wrap; gap:14px; margin: 8px 0; }
+    .checks label { display:flex; align-items:center; gap:5px; }
+    .checks input { width:auto; }
+    #url { overflow-wrap:anywhere; }
+  </style>
+</head>
+<body>
+  <h1>foo_zero_metadata Zero Bus WebSocket 测试</h1>
+  <p class="hint">只包含 SDK 当前已支持的业务接口。WebSocket 默认地址为本机；API Key 请在 foobar2000 偏好页配置，本页面不会传输或记录 API Key。</p>
+
+  <fieldset>
+    <legend>连接</legend>
+    <div class="row">
+      <label class="field" style="flex:0 1 180px">Zero Bus 端口<input id="port" type="number" min="1" max="65535" value="17890"></label>
+      <button id="connect">连接</button><button id="disconnect" disabled>断开</button>
+      <span id="status" class="status">未连接</span>
+    </div>
+    <div class="hint">连接地址：<span id="url">ws://127.0.0.1:17890</span></div>
+  </fieldset>
+
+  <section>
+    <h2>sources.list</h2><p class="hint">列出可用数据源，不需要业务参数。</p>
+    <button data-call="sources.list">调用 sources.list</button>
+  </section>
+
+  <section>
+    <h2>preferences.get</h2><p class="hint">读取当前数据源、搜索和图片偏好，不需要业务参数。</p>
+    <button data-call="preferences.get">调用 preferences.get</button>
+  </section>
+
+  <section>
+    <h2>preferences.set</h2>
+    <label class="field">偏好补丁 params（JSON）<textarea id="prefPatch">{
+  "images": { "max_cache_size_mb": 1024 }
+}</textarea></label>
+    <p class="hint">仅提交希望修改的字段。支持 providers、search、images 下的 SDK 文档字段。</p>
+    <button id="setPreferences">调用 preferences.set</button>
+  </section>
+
+  <section>
+    <h2>metadata.search</h2>
+    <div class="row">
+      <label class="field">歌手名称 artist.name<input id="artistName" placeholder="Radiohead"></label>
+      <label class="field">歌手 MBID artist.mbid（可选）<input id="artistMbid" placeholder="MusicBrainz artist ID"></label>
+      <label class="field">专辑标题 album.title<input id="albumTitle" placeholder="OK Computer"></label>
+      <label class="field">专辑 MBID album.mbid（可选）<input id="albumMbid" placeholder="MusicBrainz release-group ID"></label>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label class="field">指定数据源 provider_id（留空按偏好）<input id="providerId" placeholder="lastfm"></label>
+      <label class="field">图片模式 image_mode<select id="imageMode"><option value="none">none</option><option value="discover">discover</option><option value="ensure_local">ensure_local</option></select></label>
+      <label class="field">缓存模式 cache_mode<select id="cacheMode"><option value="default">default</option><option value="refresh">refresh</option></select></label>
+    </div>
+    <div class="checks">
+      <label><input id="forceUpdate" type="checkbox">force_update</label>
+      <label><input id="confirmIdentity" type="checkbox">confirm_identity</label>
+    </div>
+    <button id="search">调用 metadata.search</button>
+  </section>
+
+  <section>
+    <h2>asset.ensure</h2>
+    <label class="field">资产 ID asset_id（从 metadata.search 结果中复制）<input id="assetId" placeholder="64 位 BLAKE3 十六进制 ID"></label>
+    <p><button id="ensureAsset">调用 asset.ensure</button></p>
+  </section>
+
+  <section>
+    <h2>取消任务</h2>
+    <label class="field">任务 ID task_id（可从 accepted 响应中复制）<input id="taskId" placeholder="task-..."></label>
+    <p class="row"><button id="cancelTask">调用 task.cancel</button><button id="cancelAsset">调用 asset.cancel</button></p>
+  </section>
+
+  <section>
+    <h2>请求与返回数据</h2>
+    <p class="hint">下方文本框按时间追加业务请求、Zero Bus 原始响应、任务通知及连接错误。</p>
+    <textarea id="output" readonly aria-label="请求与返回数据"></textarea>
+    <p><button id="clearOutput">清空显示</button></p>
+  </section>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const output = $("output");
+  const status = $("status");
+  let socket = null;
+  const pending = new Map();
+  const sender = "sdk.test.html";
+
+  function log(label, data) {
+    const body = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    output.value += `[${new Date().toLocaleTimeString()}] ${label}\n${body}\n\n`;
+    output.scrollTop = output.scrollHeight;
+  }
+  function setStatus(text) { status.textContent = text; }
+  function refreshButtons() {
+    const connected = socket && socket.readyState === WebSocket.OPEN;
+    document.querySelectorAll("button[data-call], #setPreferences, #search, #ensureAsset, #cancelTask, #cancelAsset")
+      .forEach((button) => { button.disabled = !connected; });
+    $("disconnect").disabled = !socket || socket.readyState === WebSocket.CLOSED;
+  }
+  function parsePayload(value) {
+    if (typeof value !== "string") return value;
+    try { return JSON.parse(value); } catch (_) { return value; }
+  }
+  function send(operation, params = {}, options = {}) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      log("发送失败", "请先连接 Zero Bus。");
+      return;
+    }
+    const requestId = crypto.randomUUID ? crypto.randomUUID() : `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const request = { schema_version: 1, operation, params, options };
+    const envelope = {
+      sender, receiver: "plugin.zero_metadata", type: 1,
+      msg_id: requestId, correlation_id: "", payload: JSON.stringify(request)
+    };
+    pending.set(requestId, { operation, sentAt: Date.now() });
+    log("发送业务请求", { request_id: requestId, request, envelope });
+    socket.send(JSON.stringify(envelope));
+  }
+
+  $("port").addEventListener("input", () => {
+    $("url").textContent = `ws://127.0.0.1:${$("port").value || "<端口>"}`;
+  });
+  $("connect").addEventListener("click", () => {
+    const port = Number($("port").value);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      log("连接失败", "端口必须是 1 到 65535 之间的整数。"); return;
+    }
+    if (socket && socket.readyState !== WebSocket.CLOSED) socket.close();
+    const url = `ws://127.0.0.1:${port}`;
+    setStatus("连接中…");
+    log("连接", url);
+    try {
+      socket = new WebSocket(url);
+      refreshButtons();
+      socket.addEventListener("open", () => { setStatus("已连接"); refreshButtons(); log("连接成功", url); });
+      socket.addEventListener("message", (event) => {
+        let message;
+        try { message = JSON.parse(event.data); }
+        catch (error) { log("收到非 JSON 消息", { data: event.data, error: error.message }); return; }
+        const payload = parsePayload(message.payload);
+        log(`收到 Zero Bus 消息 type=${message.type}`, { envelope: message, payload });
+        if (message.type === 2 && payload && payload.request_id) {
+          const item = pending.get(payload.request_id);
+          if (item) item.taskId = payload.task_id;
+          if (payload.task_id) $("taskId").value = payload.task_id;
+        }
+        if (message.type === 4 && payload && payload.task_id) $("taskId").value = payload.task_id;
+      });
+      socket.addEventListener("error", () => { setStatus("连接错误"); log("WebSocket 错误", "请确认 Zero Bus 已运行且端口正确。"); refreshButtons(); });
+      socket.addEventListener("close", (event) => { setStatus("未连接"); log("连接关闭", { code: event.code, reason: event.reason || "" }); refreshButtons(); });
+    } catch (error) { setStatus("连接失败"); log("连接失败", error.message); refreshButtons(); }
+  });
+  $("disconnect").addEventListener("click", () => { if (socket) socket.close(1000, "client disconnect"); });
+  document.querySelectorAll("button[data-call]").forEach((button) => button.addEventListener("click", () => send(button.dataset.call)));
+  $("setPreferences").addEventListener("click", () => {
+    try {
+      const params = JSON.parse($("prefPatch").value || "{}");
+      if (!params || Array.isArray(params) || typeof params !== "object") throw new Error("params 必须是 JSON 对象");
+      send("preferences.set", params);
+    } catch (error) { log("参数错误", error.message); }
+  });
+  $("search").addEventListener("click", () => {
+    const artist = {}, album = {}, params = {}, options = { search_mode: "preferred_sources" };
+    const artistName = $("artistName").value.trim(), artistMbid = $("artistMbid").value.trim();
+    const albumTitle = $("albumTitle").value.trim(), albumMbid = $("albumMbid").value.trim();
+    if (artistName) artist.name = artistName;
+    if (artistMbid) artist.mbid = artistMbid;
+    if (albumTitle) album.title = albumTitle;
+    if (albumMbid) album.mbid = albumMbid;
+    if (Object.keys(artist).length) params.artist = artist;
+    if (Object.keys(album).length) params.album = album;
+    const providerId = $("providerId").value.trim();
+    if (providerId) options.provider_id = providerId;
+    options.image_mode = $("imageMode").value;
+    options.cache_mode = $("cacheMode").value;
+    if ($("forceUpdate").checked) options.force_update = true;
+    if ($("confirmIdentity").checked) options.confirm_identity = true;
+    if (!Object.keys(params).length) { log("参数错误", "歌手或专辑至少填写一项名称或 MBID。"); return; }
+    send("metadata.search", params, options);
+  });
+  $("ensureAsset").addEventListener("click", () => {
+    const assetId = $("assetId").value.trim();
+    if (!assetId) { log("参数错误", "请填写 asset_id。"); return; }
+    send("asset.ensure", { asset_id: assetId });
+  });
+  $("cancelTask").addEventListener("click", () => {
+    const taskId = $("taskId").value.trim();
+    if (!taskId) { log("参数错误", "请填写 task_id。"); return; }
+    send("task.cancel", { task_id: taskId });
+  });
+  $("cancelAsset").addEventListener("click", () => {
+    const taskId = $("taskId").value.trim();
+    if (!taskId) { log("参数错误", "请填写 task_id。"); return; }
+    send("asset.cancel", { task_id: taskId });
+  });
+  $("clearOutput").addEventListener("click", () => { output.value = ""; });
+  refreshButtons();
+})();
+</script>
+</body>
+</html>

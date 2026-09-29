@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>foo_zero_metadata zero_ui_panel 示例</title>
+<style>
+body{font:14px system-ui,sans-serif;max-width:900px;margin:24px auto;padding:0 16px}label{display:inline-flex;flex-direction:column;margin:6px}input,select,button,textarea{font:inherit;padding:6px}textarea{display:block;width:100%;min-height:300px;box-sizing:border-box;font-family:monospace}button{cursor:pointer}.row{margin:8px 0}
+</style>
+<h1>foo_zero_metadata zero_ui_panel 元数据示例</h1>
+<div class="row"><label>Zero Bus 端口<input id="port" type="number" value="17890"></label><button id="connect">连接</button><button id="disconnect" disabled>断开</button><span id="status">未连接</span></div>
+<div class="row"><label>歌手<input id="artist" value="Radiohead"></label><label>专辑<input id="album" value="OK Computer"></label><label>图片模式<select id="imageMode"><option>none</option><option>discover</option><option>ensure_local</option></select></label><button id="search" disabled>搜索</button></div>
+<div id="candidates"></div><textarea id="log" readonly aria-label="Zero Bus 消息和结果"></textarea>
+<script>
+(() => {
+  const $ = id => document.getElementById(id), tasks = new Map();
+  let ws;
+  function log(kind, data) { $("log").value += `${new Date().toLocaleTimeString()} ${kind}\n${JSON.stringify(data, null, 2)}\n\n`; $("log").scrollTop = $("log").scrollHeight; }
+  function payloadOf(value) { if (typeof value !== "string") return value; try { return JSON.parse(value); } catch { return value; } }
+  function send(operation, params = {}, options = {}) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const id = crypto.randomUUID();
+    const message = {schema_version:1, operation, params, options};
+    tasks.set(id, {operation, terminal:false});
+    const envelope = {sender:"sdk.zero_ui_panel",receiver:"plugin.zero_metadata",type:1,msg_id:id,correlation_id:"",payload:JSON.stringify(message)};
+    log("→ REQUEST", {request_id:id, message}); ws.send(JSON.stringify(envelope)); return id;
+  }
+  function renderResult(result) {
+    const root = $("candidates"); root.replaceChildren();
+    for (const [entity, label, key] of [["artists","藝人","name"],["albums","專輯","title"]]) {
+      for (const c of result?.candidates?.[entity] || []) {
+        const button = document.createElement("button"); button.textContent = `确认${label}：${c[key] || c.mbid} (${c.score ?? "?"})`;
+        button.onclick = () => send("metadata.search", {artist:{name:$("artist").value, ...(entity === "artists" ? {mbid:c.mbid} : {})}, album:{title:$("album").value, ...(entity === "albums" ? {mbid:c.mbid} : {})}}, {confirm_identity:true,image_mode:$("imageMode").value});
+        root.append(button, document.createTextNode(" "));
+      }
+    }
+  }
+  $("connect").onclick = () => { ws = new WebSocket(`ws://127.0.0.1:${Number($("port").value)}`); $("status").textContent="连接中";
+    ws.onopen = () => { $("status").textContent="已连接"; $("search").disabled=false; $("disconnect").disabled=false; send("sources.list"); };
+    ws.onmessage = event => { let msg; try { msg=JSON.parse(event.data); } catch { log("非 JSON",event.data); return; } const p=payloadOf(msg.payload); log(`← type ${msg.type}`,{envelope:msg,payload:p});
+      if (msg.type === 2 && p?.request_id) { const entry=tasks.get(p.request_id); if(entry) entry.taskId=p.task_id; }
+      if (msg.type !== 4 || !p) return;
+      const entry=tasks.get(p.request_id);
+      if (p.event === "asset.ready") { document.dispatchEvent(new CustomEvent("zero-metadata-asset-ready",{detail:p})); log("图片完成：宿主可按 asset_id 局部刷新",p); return; }
+      if (p.event === "task.completed") { renderResult(p.result); const pending=p.result?.cache?.refresh_pending===true; if(entry) entry.terminal=!pending; if(!pending) tasks.delete(p.request_id); }
+      if (p.event === "metadata.refreshed") { renderResult(p.result); tasks.delete(p.request_id); }
+      if (p.event === "task.failed") tasks.delete(p.request_id);
+    };
+    ws.onerror = () => { $("status").textContent="连接错误"; log("WebSocket 错误","请检查 Zero Bus 状态和端口"); };
+    ws.onclose = () => { $("status").textContent="未连接"; $("search").disabled=true; $("disconnect").disabled=true; };
+  };
+  $("disconnect").onclick = () => ws?.close();
+  $("search").onclick = () => { const params={}; if($("artist").value.trim()) params.artist={name:$("artist").value.trim()}; if($("album").value.trim()) params.album={title:$("album").value.trim()}; send("metadata.search",params,{search_mode:"preferred_sources",image_mode:$("imageMode").value}); };
+})();
+</script>
+</html>
